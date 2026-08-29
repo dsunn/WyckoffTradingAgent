@@ -378,3 +378,37 @@ def test_pg_index_overview_unconfigured(monkeypatch) -> None:
     result = mt._fetch_pg_index_overview(errors, "20260828", False)
     assert result is None
     assert any("unconfigured" in e for e in errors)
+
+
+def test_resolve_star_index_000680() -> None:
+    """科创综指 000680 解析（含别名）。"""
+    import agents.market_tools as mt
+
+    key, symbol, name = mt.resolve_market_history_index("科创综指")
+    assert (key, symbol) == ("star", "000680.SH")
+    assert name == "科创综指"
+    key2, symbol2, _ = mt.resolve_market_history_index("科创")
+    assert (key2, symbol2) == ("star", "000680.SH")
+
+
+def test_fetch_index_history_from_pg_dedups_dates(monkeypatch) -> None:
+    """PG 指数历史去重：同日多行只保留最后一条。"""
+    import agents.market_tools as mt
+
+    def fake_query(symbol, sql, params=None, *, use_symbol=True):
+        if "index_raw_data" in sql:
+            return [
+                ("2026-08-28", 1966.18, 2000.58, 1942.17, 1986.69, 45318682, 1e10),
+                ("2026-08-28", 1966.18, 2000.58, 1942.17, 1942.91, 45318682, 1e10),
+                ("2026-08-27", 1950.0, 1990.0, 1940.0, 1974.0, 40000000, 9e9),
+            ]
+        return []
+
+    monkeypatch.setattr("integrations.data_source_postgres._query", fake_query)
+    monkeypatch.setattr("integrations.data_source_postgres._pg_config", lambda: {"password": "x"})
+
+    df = mt._fetch_index_history_from_pg("000680.SH", 10)
+    assert df is not None
+    assert len(df) == 2
+    assert list(df["date"]) == ["2026-08-27", "2026-08-28"]
+    assert df.iloc[-1]["close"] == 1942.91  # keep="last" 保留后一条

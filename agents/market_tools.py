@@ -23,6 +23,7 @@ MARKET_HISTORY_INDEXES = {
     "chinext": ("399006.SZ", "创业板指"),
     "sse50": ("000016.SH", "上证50"),
     "csi500": ("000905.SH", "中证500"),
+    "star": ("000680.SH", "科创综指"),
 }
 MARKET_HISTORY_ALIASES = {
     "sh": "sse",
@@ -39,6 +40,8 @@ MARKET_HISTORY_ALIASES = {
     "创业板指": "chinext",
     "上证50": "sse50",
     "中证500": "csi500",
+    "科创综指": "star",
+    "科创": "star",
 }
 
 
@@ -398,8 +401,45 @@ def _finalize_market_history_frame(df, days: int):
     return out[cols].reset_index(drop=True)
 
 
+def _fetch_index_history_from_pg(symbol: str, days: int):
+    """从本地 PG index_raw_data 读指数历史日线，返回 DataFrame；不可用时返回 None。"""
+    try:
+        import pandas as pd
+
+        import integrations.data_source_postgres as pg_provider
+
+        if not pg_provider._pg_config()["password"]:
+            return None
+        code, market = str(symbol).split(".", 1)
+        rows = pg_provider._query(
+            code,
+            """
+            SELECT date::text, open, high, low, close, volume, amount
+            FROM index_raw_data
+            WHERE index_code = %s AND market = %s AND k_period = 'day'
+            ORDER BY date DESC
+            LIMIT %s
+            """,
+            (market.upper(), int(days) * 2),
+        )
+        if not rows:
+            return None
+        out = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume", "amount"])
+        for col in ("open", "high", "low", "close", "volume", "amount"):
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+        out["date"] = out["date"].astype(str).str[:10]
+        # PG 偶发同日多行（不同来源重复导入），按日期去重取最后一条。
+        out = out.drop_duplicates("date", keep="last")
+        return out.sort_values("date").reset_index(drop=True)
+    except Exception:
+        return None
+
+
 def fetch_market_history_frame(symbol: str, days: int, tool_context: ToolContext | None) -> tuple[Any, str, list[str]]:
     errors: list[str] = []
+    pg_frame = _fetch_index_history_from_pg(symbol, days)
+    if pg_frame is not None:
+        return pg_frame, "postgres", errors
     api_key = get_credential(tool_context, "tickflow_api_key", "TICKFLOW_API_KEY")
     if api_key:
         try:
