@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from integrations.data_source_format import STOCK_HIST_COLUMNS
+from integrations.data_source_format import STOCK_HIST_COLUMNS, apply_qfq_factors
 
 logger = logging.getLogger(__name__)
 
@@ -91,30 +91,7 @@ def _slice_by_window(df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
 
 
 def _apply_qfq(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    factors = _read_factors(symbol)
-    if factors is None or factors.empty:
-        return df
-    left = df.copy()
-    left["_key"] = pd.to_datetime(left["date"], errors="coerce")
-    right = factors.copy()
-    right["_key"] = pd.to_datetime(right["date"], errors="coerce")
-    merged = pd.merge_asof(
-        left.sort_values("_key"),
-        right.sort_values("_key"),
-        on="_key",
-        direction="backward",
-    )
-    # 因子按 _key 显式对齐，不依赖 merge_asof 后的位置顺序。
-    factor_by_key = merged["qfq_factor"].ffill().bfill().fillna(1.0).replace(0, 1.0)
-    factor_by_key = factor_by_key.set_axis(merged["_key"].tolist())
-    out = df.copy().reset_index(drop=True)
-    out["_key"] = pd.to_datetime(out["date"], errors="coerce")
-    factor = out["_key"].map(factor_by_key)
-    for col in ("open", "high", "low", "close"):
-        out[col] = pd.to_numeric(out[col], errors="coerce") / factor
-    # 成交量按因子放大保持成交额一致；amount 不动——复权量×复权价=原成交额，本身就是对账口径。
-    out["volume"] = pd.to_numeric(out["volume"], errors="coerce") * factor
-    return out
+    return apply_qfq_factors(df, _read_factors(symbol))
 
 
 def _read_factors(symbol: str) -> pd.DataFrame | None:

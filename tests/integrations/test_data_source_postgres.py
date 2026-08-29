@@ -24,8 +24,9 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, rows):
+    def __init__(self, rows, sql_routes=None):
         self._rows = rows
+        self._sql_routes = sql_routes or {}
         self.closed = False
 
     def cursor(self):
@@ -33,15 +34,6 @@ class _FakeConn:
 
     def close(self):
         self.closed = True
-
-
-def _fake_connect(rows):
-    import integrations.data_source_postgres as mod
-
-    def _connect(**kwargs):
-        return _FakeConn(rows)
-
-    mod._connect = _connect  # noqa: SLF001
 
 
 def _rows(dates: list[str]) -> list[tuple]:
@@ -60,6 +52,29 @@ def _rows(dates: list[str]) -> list[tuple]:
     ]
 
 
+def _factor_rows() -> list[tuple]:
+    return [
+        (pd.Timestamp("2024-01-01"), 2.0),
+        (pd.Timestamp("2025-01-01"), 1.0),
+    ]
+
+
+def _install_fake_connect(monkeypatch, rows, factor_rows=None, latest="2025-01-31"):
+    """mock _query：按 SQL 内容路由到蜡烛行 / 因子行 / 最新日期。"""
+    calls: list[str] = []
+
+    def fake_query(symbol, sql, params=None):
+        calls.append(sql)
+        if "MAX(date)" in sql:
+            return [(latest,)]
+        if "stock_adjustment_factors" in sql:
+            return list(factor_rows) if factor_rows else []
+        return list(rows)
+
+    monkeypatch.setattr(provider, "_query", fake_query)
+    return calls
+
+
 @pytest.fixture()
 def pg_env(monkeypatch):
     monkeypatch.setenv("PGHOST", "testhost")
@@ -71,7 +86,7 @@ def pg_env(monkeypatch):
 
 def test_raw_reads_full_range(pg_env, monkeypatch) -> None:
     rows = _rows(["2024-12-30", "2024-12-31", "2025-01-02", "2025-01-31"])
-    _fake_connect(rows)
+    _install_fake_connect(monkeypatch, rows)
 
     df = provider.fetch_stock_postgres("600519", "20241201", "20250131", "")
     assert list(df.columns) == list(provider.STOCK_HIST_COLUMNS)
@@ -82,40 +97,37 @@ def test_raw_reads_full_range(pg_env, monkeypatch) -> None:
 
 
 def test_filters_to_requested_date_range(pg_env, monkeypatch) -> None:
+    """SQL 层过滤（P2 修复）：provider 依赖 _query 已按窗口过滤。"""
     rows = _rows(["2024-12-30", "2024-12-31", "2025-01-02", "2025-12-31"])
-    _fake_connect(rows)
+
+    def fake_query(symbol, sql, params=None):
+        if "MAX(date)" in sql:
+            return [("2025-12-31",)]
+        if "stock_adjustment_factors" in sql:
+            return []
+        start_s, end_s = params[0], params[1]
+        return [r for r in rows if start_s <= str(r[0])[:10] <= end_s]
+
+    monkeypatch.setattr(provider, "_query", fake_query)
 
     df = provider.fetch_stock_postgres("600519", "20250101", "20250131", "")
     assert len(df) == 1
     assert df.iloc[0]["日期"] == "2025-01-02"
 
 
+def test_sql_filters_by_date_window(pg_env, monkeypatch) -> None:
+    """SQL 层按请求窗口过滤，不拉全量（review P2）。"""
+    rows = _rows(["2024-12-30", "2025-12-31"])
+    calls = _install_fake_connect(monkeypatch, rows)
+
+    provider.fetch_stock_postgres("600519", "20250101", "20250131", "")
+    candle_sql = next(s for s in calls if "MAX(date)" not in s and "stock_adjustment_factors" not in s)
+    assert "date >= %s AND date <= %s" in candle_sql
+
+
 def test_qfq_applies_factor(pg_env, monkeypatch) -> None:
     rows = _rows(["2024-12-30", "2024-12-31", "2025-01-02", "2025-01-31"])
-    _fake_connect(rows)
-
-    # 复权因子：2025-01-01 前 2.0，之后 1.0
-    factor_rows = [
-        (pd.Timestamp("2024-01-01"), 2.0),
-        (pd.Timestamp("2025-01-01"), 1.0),
-    ]
-
-    class _FactoredCursor(_FakeCursor):
-        def __init__(self, rows, factor_rows):
-            super().__init__(rows)
-            self._factor_rows = factor_rows
-
-        def execute(self, sql, params=None):
-            self._rows = self._factor_rows if "stock_adjustment_factors" in str(sql) else self._rows
-
-    class _FactoredConnect(_FakeConn):
-        def cursor(self):
-            return _FactoredCursor(rows, factor_rows)
-
-    def _connect(**kwargs):
-        return _FactoredConnect(rows)
-
-    monkeypatch.setattr(provider, "_connect", _connect)
+    _install_fake_connect(monkeypatch, rows, factor_rows=_factor_rows())
 
     df = provider.fetch_stock_postgres("600519", "20241201", "20250131", "qfq")
     pre = df[df["日期"] <= "2024-12-31"]
@@ -126,7 +138,7 @@ def test_qfq_applies_factor(pg_env, monkeypatch) -> None:
 
 def test_stale_data_raises(pg_env, monkeypatch) -> None:
     rows = _rows(["2025-12-31"])
-    _fake_connect(rows)
+    _install_fake_connect(monkeypatch, rows, latest="2025-12-31")
     with pytest.raises(RuntimeError, match="postgres stale"):
         provider.fetch_stock_postgres("000001", "20250101", "20260131", "")
 
@@ -144,6 +156,68 @@ def test_hfq_unsupported_raises(pg_env) -> None:
 
 def test_unconfigured_raises(monkeypatch) -> None:
     monkeypatch.delenv("PGPASSWORD", raising=False)
-    monkeypatch.setattr(provider, "PG_PASSWORD", "")
     with pytest.raises(RuntimeError, match="postgres unconfigured"):
         provider.fetch_stock_postgres("600519", "20250101", "20260131", "")
+
+
+def test_connection_pool_reuses_connection(pg_env, monkeypatch) -> None:
+    """同一配置下多次查询复用同一连接（review P1）。"""
+    import integrations.data_source_postgres as mod
+
+    mod._CONN_POOL.clear()
+    conns = []
+
+    def fake_psycopg2_connect(**kwargs):
+        conn = _FakeConn([])
+        conns.append(conn)
+        return conn
+
+    monkeypatch.setattr("psycopg2.connect", fake_psycopg2_connect)
+
+    c1 = mod._connect()
+    c2 = mod._connect()
+    assert c1 is c2, "应复用同一连接"
+    assert len(conns) == 1
+
+
+def test_psycopg2_missing_raises(pg_env, monkeypatch) -> None:
+    """psycopg2 缺失 → 明确报错（review P3 错误路径）。"""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "psycopg2":
+            raise ImportError("no psycopg2")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(RuntimeError, match="postgres psycopg2 missing"):
+        provider._query("600519", "SELECT 1")
+
+
+def test_empty_result_raises(pg_env, monkeypatch) -> None:
+    """库中无该股 → postgres empty（review P3 错误路径）。"""
+    _install_fake_connect(monkeypatch, [], latest="")
+    with pytest.raises(RuntimeError, match="postgres empty"):
+        provider.fetch_stock_postgres("600519", "20250101", "20250131", "")
+
+
+def test_factor_read_failure_logs_warning(pg_env, monkeypatch, caplog) -> None:
+    """因子读失败必须留痕（review P7），回退 raw 而非静默。"""
+    rows = _rows(["2025-01-02", "2025-01-31"])
+
+    def fake_query(symbol, sql, params=None):
+        if "MAX(date)" in sql:
+            return [("2025-01-31",)]
+        if "stock_adjustment_factors" in sql:
+            raise RuntimeError("boom")
+        return list(rows)
+
+    monkeypatch.setattr(provider, "_query", fake_query)
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="integrations.data_source_postgres"):
+        df = provider.fetch_stock_postgres("600519", "20250101", "20250131", "qfq")
+    assert any("factor read failed" in r.message for r in caplog.records)
+    assert len(df) == 2
