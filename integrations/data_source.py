@@ -19,6 +19,7 @@ import integrations.data_source_akshare
 import integrations.data_source_baostock
 import integrations.data_source_efinance
 import integrations.data_source_format
+import integrations.data_source_parquet
 import integrations.data_source_tickflow
 import integrations.data_source_tushare
 from integrations.index_data_source import fetch_index_akshare as fetch_index_akshare
@@ -69,12 +70,26 @@ def fetch_stock_hist(
 
 def _stock_fetchers() -> tuple[StockFetcher, ...]:
     return (
+        _try_parquet,
         _try_tickflow,
         _try_tushare,
         _try_akshare,
         _try_baostock,
         _try_efinance,
     )
+
+
+def _try_parquet(ctx: StockHistFetchContext) -> pd.DataFrame | None:
+    if _env_flag("DATA_SOURCE_DISABLE_PARQUET"):
+        ctx.failed_details.append("parquet=disabled_by_env")
+        return None
+    try:
+        df = integrations.data_source_parquet.fetch_stock_parquet(ctx.symbol, ctx.start_s, ctx.end_s, ctx.adjust)
+        return _fallback_output(ctx, df, "parquet")
+    except Exception as exc:
+        ctx.failed_details.append(f"parquet={integrations.data_source_format.compact_error(exc)}")
+        _debug_source_fail("parquet", exc)
+        return None
 
 
 def _try_tickflow(ctx: StockHistFetchContext) -> pd.DataFrame | None:
@@ -188,7 +203,7 @@ def _stock_hist_failure(ctx: StockHistFetchContext) -> RuntimeError:
     hint_suffix = _build_datasource_hint(ctx.failed_details)
     return RuntimeError(
         f"数据拉取全线失败 [标:{ctx.symbol}, 范围:{ctx.start_s}..{ctx.end_s}, 复权:{ctx.adjust}]：已按顺序尝试 "
-        f"tickflow→tushare→akshare→baostock→efinance，均无可用 K 线数据。请检查该标的是否已退市或处于长期停牌期。"
+        f"parquet→tickflow→tushare→akshare→baostock→efinance，均无可用 K 线数据。请检查该标的是否已退市或处于长期停牌期。"
         f"{detail_suffix}{hint_suffix}"
     )
 
