@@ -27,6 +27,128 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(os.getenv("PARQUET_DATA_DIR", str(Path.home() / "python" / "backtest" / "data")))
 
 
+def fetch_index_parquet(symbol: str, days: int) -> pd.DataFrame:
+    """从本地 Parquet 读取指数历史日线，返回标准列 DataFrame。"""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        raise RuntimeError("parquet pyarrow missing") from None
+
+    path = DATA_DIR / "index" / "index_daily.parquet"
+    if not path.exists():
+        raise RuntimeError("parquet index file missing")
+
+    code = str(symbol).split(".", 1)[0].strip()
+    table = pq.read_table(
+        path,
+        filters=[("index_code", "==", code), ("k_period", "==", "day")],
+        columns=["date", "open", "high", "low", "close", "volume", "amount"],
+    )
+    if not table.num_rows:
+        raise RuntimeError(f"parquet index {symbol} empty")
+
+    df = table.to_pandas()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    for col in ("open", "high", "low", "close", "volume", "amount"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["date", "close"]).drop_duplicates("date", keep="last")
+    return df.sort_values("date").tail(days * 2).reset_index(drop=True)
+
+
+def fetch_market_overview_parquet(requested: str = "") -> dict:
+    """从 index_daily.parquet 提取大盘指数截面与涨跌家数。"""
+    df = _read_index_daily_parquet()
+    req_iso = f"{requested[:4]}-{requested[4:6]}-{requested[6:]}" if requested else ""
+    df_sub = df[df["date"] <= req_iso] if req_iso else df
+    if df_sub.empty:
+        raise RuntimeError("parquet index empty for requested date")
+
+    actual_date = str(df_sub["date"].max())
+    df_actual = df_sub[df_sub["date"] == actual_date].drop_duplicates("index_code", keep="last")
+    indices = _build_parquet_indices_summary(df, df_actual, actual_date)
+    res = {
+        "indices": indices,
+        "source": "parquet",
+        "requested_date": requested,
+        "trade_date": actual_date,
+    }
+    breadth = _build_parquet_breadth(df_actual, actual_date)
+    if breadth:
+        res["breadth"] = breadth
+    return res
+
+
+def _read_index_daily_parquet() -> pd.DataFrame:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        raise RuntimeError("parquet pyarrow missing") from None
+
+    path = DATA_DIR / "index" / "index_daily.parquet"
+    if not path.exists():
+        raise RuntimeError("parquet index file missing")
+
+    cols = ["index_code", "date", "open", "high", "low", "close", "volume", "amount", "up_count", "down_count"]
+    table = pq.read_table(path, filters=[("k_period", "==", "day")], columns=cols)
+    if not table.num_rows:
+        raise RuntimeError("parquet index empty")
+
+    df = table.to_pandas()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    for col in ("open", "high", "low", "close", "volume", "amount", "up_count", "down_count"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def _build_parquet_indices_summary(df: pd.DataFrame, df_actual: pd.DataFrame, actual_date: str) -> dict:
+    indices = {}
+    from agents.market_tools import MARKET_OVERVIEW_INDICES
+
+    for ts_code, name in MARKET_OVERVIEW_INDICES.items():
+        code = ts_code.split(".", 1)[0]
+        rows = df_actual[df_actual["index_code"] == code]
+        if rows.empty:
+            indices[name] = {"error": "no data"}
+            continue
+        row = rows.iloc[0]
+        hist = df[(df["index_code"] == code) & (df["date"] < actual_date)]
+        pct_chg = 0.0
+        if not hist.empty:
+            prev = float(hist.sort_values("date").iloc[-1]["close"])
+            if prev > 0:
+                pct_chg = round((float(row["close"]) / prev - 1.0) * 100.0, 2)
+
+        indices[name] = {
+            "ts_code": ts_code,
+            "trade_date": actual_date,
+            "close": round(float(row["close"]), 2),
+            "pct_chg": pct_chg,
+            "vol": int(float(row["volume"] or 0)),
+            "amount": round(float(row["amount"] or 0), 2),
+        }
+    return indices
+
+
+def _build_parquet_breadth(df_actual: pd.DataFrame, actual_date: str) -> dict | None:
+    breadth_rows = df_actual[df_actual["up_count"].notna() & (df_actual["up_count"] > 0)]
+    if breadth_rows.empty:
+        return None
+    b_row = breadth_rows.iloc[0]
+    up = int(b_row["up_count"])
+    down = int(b_row["down_count"])
+    tot = up + down
+    return {
+        "trade_date": actual_date,
+        "sample_size": tot,
+        "up_count": up,
+        "down_count": down,
+        "flat_count": 0,
+        "up_ratio_pct": round(up / tot * 100.0, 2) if tot else None,
+        "median_pct_chg": None,
+        "average_pct_chg": None,
+    }
+
+
 def fetch_stock_parquet(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
     """从本地 Parquet 读取 A 股日线，返回 STOCK_HIST_COLUMNS 中文列。
 

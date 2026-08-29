@@ -39,7 +39,7 @@ dependencies = [
 mcp = ["mcp>=1.28.0", "starlette>=1.0.1", "jsonschema>=4.20"]
 wbt = ["wbt>=0.1.6"]
 browser = ["playwright>=1.49"]
-dev = ["pytest>=7.0", "ruff==0.16.2", "pre-commit>=3.7.0"]
+dev = ["pytest>=7.0", "ruff==0.16.2", "pre-commit>=3.7.0", "pyarrow"]
 
 [project.scripts]
 wyckoff = "cli.__main__:main"

@@ -134,3 +134,73 @@ def test_missing_pyarrow_degrades(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", fake_import)
     with pytest.raises(RuntimeError, match="pyarrow missing"):
         provider.fetch_stock_parquet("600519", "20250101", "20260131", "")
+
+
+def test_fetch_index_parquet_success(tmp_path, monkeypatch) -> None:
+    idx_dir = tmp_path / "index"
+    idx_dir.mkdir()
+    df = pd.DataFrame(
+        [
+            ("000001", "SH", "2026-01-02", 3000.0, 3050.0, 2980.0, 3020.0, 100000, 10000000.0, 1500, 500, "day"),
+            ("000001", "SH", "2026-01-05", 3020.0, 3080.0, 3010.0, 3060.0, 120000, 12000000.0, 1600, 400, "day"),
+        ],
+        columns=[
+            "index_code",
+            "market",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "up_count",
+            "down_count",
+            "k_period",
+        ],
+    )
+    df.to_parquet(idx_dir / "index_daily.parquet", index=False)
+    monkeypatch.setattr(provider, "DATA_DIR", tmp_path)
+
+    res = provider.fetch_index_parquet("000001.SH", days=5)
+    assert len(res) == 2
+    assert res.iloc[-1]["date"] == "2026-01-05"
+    assert res.iloc[-1]["close"] == 3060.0
+
+
+def test_fetch_market_overview_parquet_success(tmp_path, monkeypatch) -> None:
+    idx_dir = tmp_path / "index"
+    idx_dir.mkdir()
+    df = pd.DataFrame(
+        [
+            ("000001", "SH", "2026-01-02", 3000.0, 3050.0, 2980.0, 3000.0, 100000, 10000000.0, 1000, 1000, "day"),
+            ("000001", "SH", "2026-01-05", 3000.0, 3080.0, 3000.0, 3060.0, 120000, 12000000.0, 1600, 400, "day"),
+            ("399001", "SZ", "2026-01-05", 9000.0, 9100.0, 8950.0, 9050.0, 150000, 15000000.0, None, None, "day"),
+        ],
+        columns=[
+            "index_code",
+            "market",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "up_count",
+            "down_count",
+            "k_period",
+        ],
+    )
+    df.to_parquet(idx_dir / "index_daily.parquet", index=False)
+    monkeypatch.setattr(provider, "DATA_DIR", tmp_path)
+
+    overview = provider.fetch_market_overview_parquet("20260105")
+    assert overview["source"] == "parquet"
+    assert overview["trade_date"] == "2026-01-05"
+    assert "上证指数" in overview["indices"]
+    sh = overview["indices"]["上证指数"]
+    assert sh["close"] == 3060.0
+    assert sh["pct_chg"] == pytest.approx(2.0)
+    assert overview["breadth"]["up_count"] == 1600
+    assert overview["breadth"]["down_count"] == 400

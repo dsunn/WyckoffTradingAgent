@@ -24,6 +24,8 @@ def test_get_market_history_returns_tickflow_digest(monkeypatch):
 
     monkeypatch.setattr(mt, "get_credential", lambda *_args, **_kwargs: "tf-key")
     monkeypatch.setattr("integrations.tickflow_client.TickFlowClient", DummyTickFlowClient)
+    monkeypatch.setattr(mt, "_fetch_index_history_from_parquet", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mt, "_fetch_index_history_from_pg", lambda *_args, **_kwargs: None)
 
     result = mt.get_market_history(days=3, index="上证")
 

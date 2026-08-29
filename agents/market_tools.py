@@ -51,6 +51,9 @@ def get_market_overview(
     try:
         errors: list[str] = []
         requested = _normalize_trade_date(trade_date)
+        parquet_result = _fetch_parquet_index_overview(errors, requested)
+        if parquet_result:
+            return parquet_result
         pg_result = _fetch_pg_index_overview(errors, requested, include_breadth or bool(requested))
         if pg_result:
             return pg_result
@@ -84,6 +87,22 @@ def _normalize_trade_date(value: str) -> str:
         except ValueError:
             continue
     raise ValueError("trade_date 必须是 YYYY-MM-DD 或 YYYYMMDD")
+
+
+def _fetch_parquet_index_overview(errors: list[str], requested: str) -> dict | None:
+    """从本地 index_daily.parquet 读指数日线及大盘水温。"""
+    try:
+        from utils.env import env_flag
+
+        if env_flag("DATA_SOURCE_DISABLE_PARQUET"):
+            errors.append("parquet: disabled_by_env")
+            return None
+        import integrations.data_source_parquet as parquet_provider
+
+        return parquet_provider.fetch_market_overview_parquet(requested)
+    except Exception as exc:
+        errors.append(f"parquet: {exc}")
+        return None
 
 
 def _fetch_pg_index_overview(errors: list[str], requested: str, include_breadth: bool) -> dict | None:
@@ -401,6 +420,20 @@ def _finalize_market_history_frame(df, days: int):
     return out[cols].reset_index(drop=True)
 
 
+def _fetch_index_history_from_parquet(symbol: str, days: int):
+    """从本地 index_daily.parquet 读指数历史日线，返回 DataFrame；不可用时返回 None。"""
+    try:
+        from utils.env import env_flag
+
+        if env_flag("DATA_SOURCE_DISABLE_PARQUET"):
+            return None
+        import integrations.data_source_parquet as parquet_provider
+
+        return parquet_provider.fetch_index_parquet(symbol, days)
+    except Exception:
+        return None
+
+
 def _fetch_index_history_from_pg(symbol: str, days: int):
     """从本地 PG index_raw_data 读指数历史日线，返回 DataFrame；不可用时返回 None。"""
     try:
@@ -437,6 +470,9 @@ def _fetch_index_history_from_pg(symbol: str, days: int):
 
 def fetch_market_history_frame(symbol: str, days: int, tool_context: ToolContext | None) -> tuple[Any, str, list[str]]:
     errors: list[str] = []
+    parquet_frame = _fetch_index_history_from_parquet(symbol, days)
+    if parquet_frame is not None:
+        return parquet_frame, "parquet", errors
     pg_frame = _fetch_index_history_from_pg(symbol, days)
     if pg_frame is not None:
         return pg_frame, "postgres", errors
