@@ -47,6 +47,41 @@ SH_PREFIXES = (
     "563",
 )
 
+MARKET_OVERVIEW_INDICES = {
+    "000001.SH": "上证指数",
+    "399001.SZ": "深证成指",
+    "399006.SZ": "创业板指",
+    "000016.SH": "上证50",
+    "000905.SH": "中证500",
+}
+MARKET_HISTORY_INDEXES = {
+    "sse": ("000001.SH", "上证指数"),
+    "csi300": ("000300.SH", "沪深300"),
+    "szse": ("399001.SZ", "深证成指"),
+    "chinext": ("399006.SZ", "创业板指"),
+    "sse50": ("000016.SH", "上证50"),
+    "csi500": ("000905.SH", "中证500"),
+    "star": ("000680.SH", "科创综指"),
+}
+MARKET_HISTORY_ALIASES = {
+    "sh": "sse",
+    "上证": "sse",
+    "上证指数": "sse",
+    "沪指": "sse",
+    "沪深300": "csi300",
+    "300": "csi300",
+    "sz": "szse",
+    "深证": "szse",
+    "深成指": "szse",
+    "深证成指": "szse",
+    "创业板": "chinext",
+    "创业板指": "chinext",
+    "上证50": "sse50",
+    "中证500": "csi500",
+    "科创综指": "star",
+    "科创": "star",
+}
+
 
 def to_ts_code(symbol: str) -> str:
     code = str(symbol).strip()

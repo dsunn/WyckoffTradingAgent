@@ -161,11 +161,59 @@ def test_fetch_index_parquet_success(tmp_path, monkeypatch) -> None:
     )
     df.to_parquet(idx_dir / "index_daily.parquet", index=False)
     monkeypatch.setattr(provider, "DATA_DIR", tmp_path)
+    # Mock today_str to avoid staleness trigger
+    monkeypatch.setattr("pandas.Timestamp.now", lambda: pd.Timestamp("2026-01-05"))
 
     res = provider.fetch_index_parquet("000001.SH", days=5)
     assert len(res) == 2
     assert res.iloc[-1]["date"] == "2026-01-05"
     assert res.iloc[-1]["close"] == 3060.0
+
+
+def test_fetch_index_parquet_stale(tmp_path, monkeypatch) -> None:
+    idx_dir = tmp_path / "index"
+    idx_dir.mkdir()
+    df = pd.DataFrame(
+        [
+            ("000001", "SH", "2025-01-02", 3000.0, 3050.0, 2980.0, 3000.0, 100000, 10000000.0, 1000, 1000, "day"),
+        ],
+        columns=[
+            "index_code",
+            "market",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "up_count",
+            "down_count",
+            "k_period",
+        ],
+    )
+    df.to_parquet(idx_dir / "index_daily.parquet", index=False)
+    monkeypatch.setattr(provider, "DATA_DIR", tmp_path)
+    monkeypatch.setattr("pandas.Timestamp.now", lambda: pd.Timestamp("2026-01-05"))
+
+    with pytest.raises(RuntimeError, match="parquet index stale"):
+        provider.fetch_index_parquet("000001.SH", days=5)
+
+
+def test_fetch_index_parquet_missing_pyarrow(tmp_path, monkeypatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "pyarrow" or name.startswith("pyarrow."):
+            raise ImportError("no pyarrow")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(provider, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(RuntimeError, match="pyarrow missing"):
+        provider.fetch_index_parquet("000001.SH", days=5)
 
 
 def test_fetch_market_overview_parquet_success(tmp_path, monkeypatch) -> None:

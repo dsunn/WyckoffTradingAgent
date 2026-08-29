@@ -20,7 +20,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from integrations.data_source_format import STOCK_HIST_COLUMNS, apply_qfq_factors, data_covers_end
+from integrations.data_source_format import (
+    MARKET_OVERVIEW_INDICES,
+    STOCK_HIST_COLUMNS,
+    apply_qfq_factors,
+    data_covers_end,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +57,25 @@ def fetch_index_parquet(symbol: str, days: int) -> pd.DataFrame:
     for col in ("open", "high", "low", "close", "volume", "amount"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df.dropna(subset=["date", "close"]).drop_duplicates("date", keep="last")
+    if df.empty:
+        raise RuntimeError(f"parquet index {symbol} empty")
+
+    max_date = str(df["date"].max()).replace("-", "")
+    today_str = pd.Timestamp.now().strftime("%Y%m%d")
+    if not data_covers_end(max_date, today_str):
+        raise RuntimeError(f"parquet index stale max={df['date'].max()}")
+
     return df.sort_values("date").tail(days * 2).reset_index(drop=True)
 
 
 def fetch_market_overview_parquet(requested: str = "") -> dict:
     """从 index_daily.parquet 提取大盘指数截面与涨跌家数。"""
     df = _read_index_daily_parquet()
+    target_end = requested or pd.Timestamp.now().strftime("%Y%m%d")
+    max_available = str(df["date"].max()).replace("-", "")
+    if not data_covers_end(max_available, target_end):
+        raise RuntimeError(f"parquet index stale max={df['date'].max()}")
+
     req_iso = f"{requested[:4]}-{requested[4:6]}-{requested[6:]}" if requested else ""
     df_sub = df[df["date"] <= req_iso] if req_iso else df
     if df_sub.empty:
@@ -102,8 +120,6 @@ def _read_index_daily_parquet() -> pd.DataFrame:
 
 def _build_parquet_indices_summary(df: pd.DataFrame, df_actual: pd.DataFrame, actual_date: str) -> dict:
     indices = {}
-    from agents.market_tools import MARKET_OVERVIEW_INDICES
-
     for ts_code, name in MARKET_OVERVIEW_INDICES.items():
         code = ts_code.split(".", 1)[0]
         rows = df_actual[df_actual["index_code"] == code]
@@ -146,6 +162,7 @@ def _build_parquet_breadth(df_actual: pd.DataFrame, actual_date: str) -> dict | 
         "up_ratio_pct": round(up / tot * 100.0, 2) if tot else None,
         "median_pct_chg": None,
         "average_pct_chg": None,
+        "note": "flat_count not tracked in parquet summary",
     }
 
 
