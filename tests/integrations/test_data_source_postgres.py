@@ -140,7 +140,16 @@ def test_stale_data_raises(pg_env, monkeypatch) -> None:
     rows = _rows(["2025-12-31"])
     _install_fake_connect(monkeypatch, rows, latest="2025-12-31")
     with pytest.raises(RuntimeError, match="postgres stale"):
-        provider.fetch_stock_postgres("000001", "20250101", "20260131", "")
+        provider.fetch_stock_postgres("000001", "20250101", "20260130", "")
+
+
+def test_weekend_end_not_stale(pg_env, monkeypatch) -> None:
+    """周六请求：数据到周五即视为覆盖，不降级（真实场景 2026-08-29 周六）。"""
+    rows = _rows(["2026-08-28"])
+    _install_fake_connect(monkeypatch, rows, latest="2026-08-28")
+    df = provider.fetch_stock_postgres("600519", "20260801", "20260829", "")
+    assert len(df) == 1
+    assert df.iloc[0]["日期"] == "2026-08-28"
 
 
 def test_unsupported_symbol_raises(pg_env) -> None:

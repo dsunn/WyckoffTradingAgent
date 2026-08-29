@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from integrations.data_source_format import STOCK_HIST_COLUMNS, apply_qfq_factors
+from integrations.data_source_format import STOCK_HIST_COLUMNS, apply_qfq_factors, data_covers_end
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def fetch_stock_parquet(symbol: str, start: str, end: str, adjust: str) -> pd.Da
         raise RuntimeError("parquet empty")
     # stale 检查基于全量最新日期：数据源未覆盖到请求结束日时降级实时源。
     max_date = str(candles["date"].max()).replace("-", "")
-    if max_date < end:
+    if not data_covers_end(max_date, end):
         raise RuntimeError(f"parquet stale max={candles['date'].max()}")
 
     candles = _slice_by_window(candles, start, end)

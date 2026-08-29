@@ -21,7 +21,7 @@ import time
 
 import pandas as pd
 
-from integrations.data_source_format import STOCK_HIST_COLUMNS, apply_qfq_factors
+from integrations.data_source_format import STOCK_HIST_COLUMNS, apply_qfq_factors, data_covers_end
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +155,7 @@ def fetch_stock_postgres(symbol: str, start: str, end: str, adjust: str) -> pd.D
     max_date = _latest_date(symbol)
     if not max_date:
         raise RuntimeError("postgres empty")
-    if max_date.replace("-", "") < end:
+    if not data_covers_end(max_date.replace("-", ""), end):
         raise RuntimeError(f"postgres stale max={max_date}")
 
     candles = _read_candles(symbol, start, end)

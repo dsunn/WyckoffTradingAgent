@@ -95,6 +95,31 @@ def hist_date_text(value: str | date) -> str:
     return value.strftime("%Y%m%d") if isinstance(value, date) else str(value).replace("-", "")
 
 
+def data_covers_end(max_date: str, end: str) -> bool:
+    """判断本地数据是否覆盖到请求结束日（YYYYMMDD 字符串）。
+
+    end 为非交易日（周末/节假日）时，数据最新日期到达最近交易日即视为覆盖——
+    否则周六请求会把周五的数据误判为 stale，而降级到实时源也拿不到周六的 bar。
+    """
+    max_d = pd.to_datetime(max_date, errors="coerce").date()
+    end_d = pd.to_datetime(end, errors="coerce").date()
+    if pd.isna(max_d) or pd.isna(end_d):
+        return False
+    if max_d >= end_d:
+        return True
+    from utils.trading_clock import is_a_share_trading_day
+
+    if is_a_share_trading_day(end_d):
+        return False
+    # end 非交易日：回溯到它之前最近的交易日，数据到那天即视为覆盖。
+    cursor = end_d - timedelta(days=1)
+    while cursor > max_d:
+        if is_a_share_trading_day(cursor):
+            return max_d >= cursor
+        cursor -= timedelta(days=1)
+    return max_d >= cursor
+
+
 def normalize_efinance_columns(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
     if "日期" not in work.columns:
