@@ -257,3 +257,76 @@ def test_pg_config_env_overrides_file(monkeypatch) -> None:
 
     monkeypatch.setattr("integrations.local_auth.load_config", fake_load_config)
     assert provider._pg_config()["host"] == "env-host"
+
+
+def test_pg_config_empty_env_overrides_file(monkeypatch) -> None:
+    """显式空 env 也赢过 config 文件（review P2）。"""
+    monkeypatch.setenv("PGHOST", "")
+    monkeypatch.delenv("PGPORT", raising=False)
+
+    def fake_load_config():
+        return {"pg_data_source": {"host": "file-host", "port": "15432"}}
+
+    monkeypatch.setattr("integrations.local_auth.load_config", fake_load_config)
+    cfg = provider._pg_config()
+    assert cfg["host"] == provider._PG_DEFAULTS["host"], "空 env 应回退默认而非 config"
+    assert cfg["port"] == "15432", "未设 env 的键才用 config"
+
+
+def test_pg_config_file_corrupt_logs_debug(monkeypatch, caplog) -> None:
+    """config 文件损坏时留 debug 日志（review P2）。"""
+    for key in ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"):
+        monkeypatch.delenv(key, raising=False)
+    import logging
+
+    def fake_load_config():
+        raise RuntimeError("corrupted")
+
+    monkeypatch.setattr("integrations.local_auth.load_config", fake_load_config)
+    with caplog.at_level(logging.DEBUG, logger="integrations.data_source_postgres"):
+        cfg = provider._pg_config()
+    assert cfg["host"] == provider._PG_DEFAULTS["host"], "损坏时回退默认"
+    assert any("pg config file read failed" in r.message for r in caplog.records)
+
+
+def test_pool_key_includes_password(pg_env, monkeypatch) -> None:
+    """换密码后不复用旧认证连接（review P2）。"""
+    import integrations.data_source_postgres as mod
+
+    mod._CONN_POOL.clear()
+    conns = []
+
+    def fake_psycopg2_connect(**kwargs):
+        conn = _FakeConn([])
+        conns.append(conn)
+        return conn
+
+    monkeypatch.setattr("psycopg2.connect", fake_psycopg2_connect)
+    monkeypatch.setenv("PGPASSWORD", "pass-1")
+    c1 = mod._connect()
+    monkeypatch.setenv("PGPASSWORD", "pass-2")
+    c2 = mod._connect()
+    assert c1 is not c2, "密码不同应新建连接"
+    assert len(conns) == 2
+
+
+def test_idle_expired_connection_closed(pg_env, monkeypatch) -> None:
+    """空闲超时替换旧连接时显式关闭（review P2）。"""
+    import integrations.data_source_postgres as mod
+
+    mod._CONN_POOL.clear()
+    conns = []
+
+    def fake_psycopg2_connect(**kwargs):
+        conn = _FakeConn([])
+        conns.append(conn)
+        return conn
+
+    monkeypatch.setattr("psycopg2.connect", fake_psycopg2_connect)
+    monkeypatch.setattr(mod, "_CONN_IDLE_TIMEOUT_SECONDS", -1.0)  # 强制立即过期
+
+    c1 = mod._connect()
+    c2 = mod._connect()
+    assert c1 is not c2, "过期后应新建连接"
+    assert c1.closed is True, "旧连接应被显式关闭"
+    assert len(conns) == 2

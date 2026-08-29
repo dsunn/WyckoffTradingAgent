@@ -47,9 +47,13 @@ def _pg_config() -> dict[str, str]:
     file_cfg = _pg_config_file()
     out: dict[str, str] = {}
     for key, env, default in _pg_env_bindings():
-        env_value = os.getenv(env, "").strip()
-        file_value = str(file_cfg.get(key, "") or "").strip()
-        out[key] = env_value or file_value or default
+        env_raw = os.getenv(env)
+        if env_raw is not None:
+            # 显式设了 env（含空串）就赢过 config 文件；只有未设才回退。
+            out[key] = env_raw.strip() or default
+        else:
+            file_value = str(file_cfg.get(key, "") or "").strip()
+            out[key] = file_value or default
     return out
 
 
@@ -59,7 +63,8 @@ def _pg_config_file() -> dict[str, str]:
 
         data = load_config()
         return dict(data.get("pg_data_source", {}) or {})
-    except Exception:
+    except Exception as exc:
+        logger.debug("pg config file read failed: %s", exc)
         return {}
 
 
@@ -84,7 +89,8 @@ def _connect():
     import psycopg2
 
     cfg = _pg_config()
-    key = (cfg["host"], cfg["port"], cfg["user"], cfg["database"])
+    # 池 key 含 password：env/config 换密码后不复用旧认证的连接。
+    key = (cfg["host"], cfg["port"], cfg["user"], cfg["database"], cfg["password"])
     now = time.monotonic()
     with _CONN_LOCK:
         pooled = _CONN_POOL.get(key)
@@ -99,6 +105,8 @@ def _connect():
             connect_timeout=5,
         )
         _CONN_POOL[key] = (conn, now)
+        if pooled:
+            _safe_close(pooled[0])
         return conn
 
 
@@ -110,7 +118,14 @@ def _release(conn) -> None:
         for _key, (pooled, _ts) in list(_CONN_POOL.items()):
             if pooled is conn:
                 return
-    conn.close()
+    _safe_close(conn)
+
+
+def _safe_close(conn) -> None:
+    try:
+        conn.close()
+    except Exception:
+        pass
 
 
 def _discard(conn) -> None:
