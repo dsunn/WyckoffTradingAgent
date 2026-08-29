@@ -32,6 +32,7 @@ def _disable_other_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATA_SOURCE_DISABLE_BAOSTOCK", "1")
     monkeypatch.setenv("DATA_SOURCE_DISABLE_EFINANCE", "1")
     monkeypatch.setenv("DATA_SOURCE_DISABLE_PARQUET", "1")
+    monkeypatch.setenv("DATA_SOURCE_DISABLE_POSTGRES", "1")
     monkeypatch.delenv("DATA_SOURCE_DISABLE_TICKFLOW", raising=False)
 
 
@@ -63,6 +64,7 @@ def test_fetch_stock_hist_prefers_parquet_over_tickflow(tmp_path, monkeypatch: p
     monkeypatch.setenv("DATA_SOURCE_DISABLE_EFINANCE", "1")
     monkeypatch.delenv("DATA_SOURCE_DISABLE_TICKFLOW", raising=False)
     monkeypatch.delenv("DATA_SOURCE_DISABLE_PARQUET", raising=False)
+    monkeypatch.setenv("DATA_SOURCE_DISABLE_POSTGRES", "1")
 
     out = ds.fetch_stock_hist("600519", "2026-04-10", "2026-04-18", adjust="qfq")
     assert out.attrs.get("source") == "parquet"
@@ -130,4 +132,4 @@ def test_fetch_stock_hist_error_message_contains_tickflow_chain(monkeypatch: pyt
 
     with pytest.raises(RuntimeError) as exc:
         ds.fetch_stock_hist("000001", "2026-04-10", "2026-04-18", adjust="qfq")
-    assert "parquet→tickflow→tushare→akshare→baostock→efinance" in str(exc.value)
+    assert "parquet→postgres→tickflow→tushare→akshare→baostock→efinance" in str(exc.value)
