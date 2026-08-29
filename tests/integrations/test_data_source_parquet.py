@@ -57,6 +57,21 @@ def test_raw_reads_full_range(parquet_dir) -> None:
     assert pd.isna(df.iloc[0]["成交额"])
 
 
+def test_amount_passthrough_when_populated(tmp_path, monkeypatch) -> None:
+    """asharedb 补填 amount 后，provider 应透传真值而非 NA。"""
+    candles = tmp_path / "candles"
+    candles.mkdir()
+    df = pd.DataFrame(
+        [("600519", "2026-02-02", 10.0, 10.5, 9.9, 10.3, 1000, 123456789.0)],
+        columns=["code", "date", "open", "high", "low", "close", "volume", "amount"],
+    )
+    df.to_parquet(candles / "2026.parquet", index=False)
+    monkeypatch.setattr(provider, "DATA_DIR", tmp_path)
+
+    out = provider.fetch_stock_parquet("600519", "20260201", "20260202", "")
+    assert out.iloc[0]["成交额"] == pytest.approx(123456789.0)
+
+
 def test_qfq_applies_factor(parquet_dir) -> None:
     df = provider.fetch_stock_parquet("600519", "20241201", "20250131", "qfq")
     # 2024 年价格 / 2.0，2025 年起因子 1.0
