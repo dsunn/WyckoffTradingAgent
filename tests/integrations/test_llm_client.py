@@ -246,3 +246,23 @@ class TestGeminiTruncationHandling:
                 allow_truncated_text=False,
                 base_url="",
             )
+
+
+def test_sanitize_llm_text_removes_surrogates() -> None:
+    """模型返回含非法 surrogate 时清洗为 U+FFFD，防止 Windows 编码崩溃。"""
+    from integrations.llm_client import _sanitize_llm_text
+
+    bad = "abc" + chr(0xDCA5) + "def"
+    out = _sanitize_llm_text(bad)
+    assert chr(0xDCA5) not in out, "surrogate 必须被清除"
+    assert out.startswith("abc") and out.endswith("def"), "结构不得破坏"
+    assert len(out) >= 5, "清洗后仍保留有效字符"
+
+
+def test_sanitize_llm_text_preserves_normal_text() -> None:
+    from integrations.llm_client import _sanitize_llm_text
+
+    assert _sanitize_llm_text("plain ascii") == "plain ascii"
+    cn = "今日市场观察：上证指数上涨0.5%"
+    assert _sanitize_llm_text(cn) == cn
+    assert _sanitize_llm_text("") == ""

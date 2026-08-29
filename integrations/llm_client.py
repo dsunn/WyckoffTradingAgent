@@ -257,19 +257,34 @@ def call_llm(
         allow_truncated_text=allow_truncated_text,
     )
     if routed is not None:
-        return routed
-    return _call_native_llm(
-        provider,
-        model,
-        api_key,
-        system_prompt,
-        user_message,
-        images=images,
-        base_url=base_url,
-        timeout=timeout,
-        max_output_tokens=max_output_tokens,
-        allow_truncated_text=allow_truncated_text,
+        return _sanitize_llm_text(routed)
+    return _sanitize_llm_text(
+        _call_native_llm(
+            provider,
+            model,
+            api_key,
+            system_prompt,
+            user_message,
+            images=images,
+            base_url=base_url,
+            timeout=timeout,
+            max_output_tokens=max_output_tokens,
+            allow_truncated_text=allow_truncated_text,
+        )
     )
+
+
+def _sanitize_llm_text(text: str) -> str:
+    """清洗模型返回文本中的非法 UTF-16 surrogate，防止 Windows 编码崩溃。
+
+    模型/SDK 偶发返回含 surrogate（如 \\udca5）的文本，Windows 上 Python
+    stdout 严格 UTF-8 编码会抛 'utf-8' codec can't encode character。
+    在文本进入 IPC/工具结果边界前统一替换为 U+FFFD。
+    """
+    out = str(text or "")
+    if out.isascii():
+        return out
+    return out.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def _call_openai_compatible(
