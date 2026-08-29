@@ -157,45 +157,35 @@ def _fill_index_pct_changes(pg_provider, indices: dict[str, dict]) -> None:
 
 
 def _pg_market_breadth(pg_provider, trade_date: str) -> dict:
-    """从 stock_raw_data 算全市涨跌家数（与 tushare breadth 同构）。"""
-    # 用日期范围（idx_stock_raw_data_code_date 索引可走）替代 LIKE 全扫，避免 5000 万行扫描。
-    # _query 强制首参为 symbol；这里不需要过滤 symbol，参数直接放 date 边界。
+    """从 index_raw_data 的 up_count/down_count 算 breadth（数据源维护的真实统计）。
+
+    000001.SH 是沪市口径、399001.SZ 是深市口径，两市无重叠，相加即全市场。
+    相比从 stock_raw_data 全表算（5 千万行扫描），零计算成本且口径权威。
+    """
     rows = pg_provider._query(
         "",
         """
-        SELECT close, open FROM stock_raw_data
-        WHERE k_period = 'day' AND date >= %s AND date < %s
+        SELECT index_code, up_count, down_count FROM index_raw_data
+        WHERE k_period = 'day' AND date::date = %s
+          AND index_code IN ('000001', '399001') AND up_count IS NOT NULL
         """,
-        (f"{trade_date} 00:00:00", f"{trade_date} 23:59:59"),
+        (trade_date,),
         use_symbol=False,
     )
     if not rows:
-        return {"error": "指定交易日无全市日线截面", "trade_date": trade_date}
-    up = down = flat = 0
-    changes = []
-    for close, open_ in rows:
-        if close is None or open_ is None or float(close) <= 0 or float(open_) <= 0:
-            continue
-        pct = (float(close) / float(open_) - 1.0) * 100.0
-        changes.append(pct)
-        if pct > 0:
-            up += 1
-        elif pct < 0:
-            down += 1
-        else:
-            flat += 1
-    total = len(changes)
-    import statistics
-
+        return {"error": "指定交易日无指数涨跌家数", "trade_date": trade_date}
+    up = sum(int(r[1] or 0) for r in rows)
+    down = sum(int(r[2] or 0) for r in rows)
+    total = up + down
     return {
         "trade_date": trade_date,
         "sample_size": total,
         "up_count": up,
         "down_count": down,
-        "flat_count": flat,
+        "flat_count": 0,
         "up_ratio_pct": round(up / total * 100.0, 2) if total else None,
-        "median_pct_chg": round(float(statistics.median(changes)), 2) if total else None,
-        "average_pct_chg": round(sum(changes) / total, 2) if total else None,
+        "median_pct_chg": None,
+        "average_pct_chg": None,
     }
 
 

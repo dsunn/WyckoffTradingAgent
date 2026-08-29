@@ -146,12 +146,18 @@ def _build_parquet_indices_summary(df: pd.DataFrame, df_actual: pd.DataFrame, ac
 
 
 def _build_parquet_breadth(df_actual: pd.DataFrame, actual_date: str) -> dict | None:
-    breadth_rows = df_actual[df_actual["up_count"].notna() & (df_actual["up_count"] > 0)]
+    """从当日指数行的 up_count/down_count 算全市场 breadth。
+
+    000001.SH（沪市）+ 399001.SZ（深市）两市无重叠，相加即全市场口径；
+    与 PG 版 _pg_market_breadth 一致。单指数口径（如 000300 成分）会低估。
+    """
+    breadth_rows = df_actual[
+        df_actual["index_code"].isin(("000001", "399001")) & df_actual["up_count"].notna() & (df_actual["up_count"] > 0)
+    ]
     if breadth_rows.empty:
         return None
-    b_row = breadth_rows.iloc[0]
-    up = int(b_row["up_count"])
-    down = int(b_row["down_count"])
+    up = int(breadth_rows["up_count"].sum())
+    down = int(breadth_rows["down_count"].sum())
     tot = up + down
     return {
         "trade_date": actual_date,
@@ -162,7 +168,7 @@ def _build_parquet_breadth(df_actual: pd.DataFrame, actual_date: str) -> dict | 
         "up_ratio_pct": round(up / tot * 100.0, 2) if tot else None,
         "median_pct_chg": None,
         "average_pct_chg": None,
-        "note": "flat_count not tracked in parquet summary",
+        "note": "flat_count not tracked in index summary",
     }
 
 

@@ -252,3 +252,28 @@ def test_fetch_market_overview_parquet_success(tmp_path, monkeypatch) -> None:
     assert sh["pct_chg"] == pytest.approx(2.0)
     assert overview["breadth"]["up_count"] == 1600
     assert overview["breadth"]["down_count"] == 400
+
+
+def test_parquet_breadth_sums_sh_sz(tmp_path, monkeypatch) -> None:
+    """breadth = 沪市(000001) + 深市(399001) 相加，不是单指数口径。"""
+    import integrations.data_source_parquet as provider
+
+    candles = tmp_path / "candles"
+    candles.mkdir()
+    df = pd.DataFrame(
+        [
+            ("000001", "2026-08-28", 3900.0, 3955.0, 3890.0, 3952.18, 1e8, 1e10, 1268, 978),
+            ("399001", "2026-08-28", 13900.0, 14000.0, 13800.0, 13953.07, 2e8, 2e10, 1524, 1281),
+            ("000300", "2026-08-28", 4000.0, 4050.0, 3980.0, 4020.0, 3e8, 3e10, 1268, 978),
+        ],
+        columns=["index_code", "date", "open", "high", "low", "close", "volume", "amount", "up_count", "down_count"],
+    )
+    df.to_parquet(candles / "2026.parquet", index=False)
+    monkeypatch.setattr(provider, "DATA_DIR", tmp_path)
+
+    df_actual = df.drop_duplicates("index_code", keep="last")
+    b = provider._build_parquet_breadth(df_actual, "2026-08-28")
+    assert b is not None
+    assert b["up_count"] == 1268 + 1524
+    assert b["down_count"] == 978 + 1281
+    assert b["sample_size"] == 1268 + 1524 + 978 + 1281
