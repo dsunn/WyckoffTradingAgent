@@ -339,3 +339,42 @@ def test_idle_expired_connection_closed(pg_env, monkeypatch) -> None:
     assert c1 is not c2, "过期后应新建连接"
     assert c1.closed is True, "旧连接应被显式关闭"
     assert len(conns) == 2
+
+
+def test_pg_index_overview_builds_indices(monkeypatch) -> None:
+    """PG 指数大盘：mock _query 返回指数行，验证结构与 pct_chg 计算。"""
+    import agents.market_tools as mt
+
+    calls: list[str] = []
+
+    def fake_query(symbol, sql, params=None, *, use_symbol=True):
+        calls.append(sql)
+        if "index_raw_data" in sql and "date < %s" in sql:
+            # 前一日收盘查询（注意 date <= 也含 "date <" 子串，须精确匹配）
+            return [(3800.0,)]
+        if "index_raw_data" in sql:
+            # 最新行：date, open, high, low, close, volume, amount
+            return [("2026-08-28", 3900.0, 3955.0, 3890.0, 3952.18, 510581645, 970365140992.0)]
+        return []  # breadth 不测
+
+    monkeypatch.setattr("integrations.data_source_postgres._query", fake_query)
+    monkeypatch.setattr("integrations.data_source_postgres._pg_config", lambda: {"password": "x"})
+
+    result = mt._fetch_pg_index_overview([], "20260828", False)
+    assert result is not None
+    assert result["source"] == "postgres"
+    assert result["trade_date"] == "2026-08-28"
+    sh = result["indices"]["上证指数"]
+    assert sh["close"] == 3952.18
+    assert sh["pct_chg"] == pytest.approx((3952.18 / 3800.0 - 1.0) * 100.0, abs=0.01)
+
+
+def test_pg_index_overview_unconfigured(monkeypatch) -> None:
+    """PG 未配置时返回 None 并记录错误。"""
+    import agents.market_tools as mt
+
+    monkeypatch.setattr("integrations.data_source_postgres._pg_config", lambda: {"password": ""})
+    errors: list[str] = []
+    result = mt._fetch_pg_index_overview(errors, "20260828", False)
+    assert result is None
+    assert any("unconfigured" in e for e in errors)

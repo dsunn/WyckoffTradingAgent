@@ -48,6 +48,9 @@ def get_market_overview(
     try:
         errors: list[str] = []
         requested = _normalize_trade_date(trade_date)
+        pg_result = _fetch_pg_index_overview(errors, requested, include_breadth or bool(requested))
+        if pg_result:
+            return pg_result
         tushare_result = _fetch_tushare_overview(tool_context, errors, requested, include_breadth or bool(requested))
         if tushare_result:
             return tushare_result
@@ -78,6 +81,129 @@ def _normalize_trade_date(value: str) -> str:
         except ValueError:
             continue
     raise ValueError("trade_date 必须是 YYYY-MM-DD 或 YYYYMMDD")
+
+
+def _fetch_pg_index_overview(errors: list[str], requested: str, include_breadth: bool) -> dict | None:
+    """从本地 PG market 库读指数日线（index_raw_data），产出与 tushare 同构结果。
+
+    大盘数据优先走本地库（无需 TUSHARE_TOKEN/网络），tushare 作为兜底。
+    代码映射：tushare 的 000001.SH 对应 PG 的 index_code 000001 + market SH。
+    """
+    try:
+        import integrations.data_source_postgres as pg_provider
+
+        if not pg_provider._pg_config()["password"]:
+            errors.append("postgres: unconfigured")
+            return None
+        end_d = datetime.strptime(requested, "%Y%m%d").date() if requested else date.today()
+        indices: dict[str, dict] = {}
+        for ts_code, name in MARKET_OVERVIEW_INDICES.items():
+            code, market = ts_code.split(".")
+            rows = pg_provider._query(
+                code,
+                """
+                SELECT date::text, open, high, low, close, volume, amount
+                FROM index_raw_data
+                WHERE index_code = %s AND market = %s AND k_period = 'day' AND date <= %s
+                ORDER BY date DESC
+                LIMIT 1
+                """,
+                (market, end_d.isoformat()),
+            )
+            if not rows:
+                indices[name] = {"error": "no data"}
+                continue
+            row = rows[0]
+            indices[name] = {
+                "ts_code": ts_code,
+                "trade_date": str(row[0])[:10],
+                "close": round(float(row[4]), 2),
+                "pct_chg": 0.0,  # 涨跌幅用前一交易日收盘补算
+                "vol": int(float(row[5])),
+                "amount": round(float(row[6]), 2),
+            }
+        if not indices:
+            return None
+        _fill_index_pct_changes(pg_provider, indices)
+        actual_dates = [entry.get("trade_date", "") for entry in indices.values() if entry.get("trade_date")]
+        actual_date = max(actual_dates) if actual_dates else ""
+        result = {
+            "indices": indices,
+            "source": "postgres",
+            "requested_date": requested,
+            "trade_date": actual_date,
+        }
+        if include_breadth and actual_date:
+            result["breadth"] = _pg_market_breadth(pg_provider, actual_date)
+        return result
+    except Exception as exc:
+        errors.append(f"postgres: {exc}")
+        return None
+
+
+def _fill_index_pct_changes(pg_provider, indices: dict[str, dict]) -> None:
+    """用前一交易日收盘补算各指数涨跌幅（PG 无 pct_chg 列）。"""
+    for ts_code, name in MARKET_OVERVIEW_INDICES.items():
+        entry = indices.get(name)
+        if not entry or "error" in entry:
+            continue
+        code, market = ts_code.split(".")
+        rows = pg_provider._query(
+            code,
+            """
+            SELECT close FROM index_raw_data
+            WHERE index_code = %s AND market = %s AND k_period = 'day' AND date < %s
+            ORDER BY date DESC LIMIT 1
+            """,
+            (market, entry["trade_date"]),
+        )
+        if rows:
+            prev = float(rows[0][0])
+            if prev > 0:
+                entry["pct_chg"] = round((float(entry["close"]) / prev - 1.0) * 100.0, 2)
+
+
+def _pg_market_breadth(pg_provider, trade_date: str) -> dict:
+    """从 stock_raw_data 算全市涨跌家数（与 tushare breadth 同构）。"""
+    # 用日期范围（idx_stock_raw_data_code_date 索引可走）替代 LIKE 全扫，避免 5000 万行扫描。
+    # _query 强制首参为 symbol；这里不需要过滤 symbol，参数直接放 date 边界。
+    rows = pg_provider._query(
+        "",
+        """
+        SELECT close, open FROM stock_raw_data
+        WHERE k_period = 'day' AND date >= %s AND date < %s
+        """,
+        (f"{trade_date} 00:00:00", f"{trade_date} 23:59:59"),
+        use_symbol=False,
+    )
+    if not rows:
+        return {"error": "指定交易日无全市日线截面", "trade_date": trade_date}
+    up = down = flat = 0
+    changes = []
+    for close, open_ in rows:
+        if close is None or open_ is None or float(close) <= 0 or float(open_) <= 0:
+            continue
+        pct = (float(close) / float(open_) - 1.0) * 100.0
+        changes.append(pct)
+        if pct > 0:
+            up += 1
+        elif pct < 0:
+            down += 1
+        else:
+            flat += 1
+    total = len(changes)
+    import statistics
+
+    return {
+        "trade_date": trade_date,
+        "sample_size": total,
+        "up_count": up,
+        "down_count": down,
+        "flat_count": flat,
+        "up_ratio_pct": round(up / total * 100.0, 2) if total else None,
+        "median_pct_chg": round(float(statistics.median(changes)), 2) if total else None,
+        "average_pct_chg": round(sum(changes) / total, 2) if total else None,
+    }
 
 
 def _fetch_tushare_overview(

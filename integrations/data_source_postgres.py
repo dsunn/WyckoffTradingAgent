@@ -222,7 +222,7 @@ def _read_factors(symbol: str) -> pd.DataFrame | None:
     return out
 
 
-def _query(symbol: str, sql: str, params: tuple | None = None) -> list[tuple]:
+def _query(symbol: str, sql: str, params: tuple | None = None, *, use_symbol: bool = True) -> list[tuple]:
     try:
         conn = _connect()
     except ImportError:
@@ -231,7 +231,8 @@ def _query(symbol: str, sql: str, params: tuple | None = None) -> list[tuple]:
         raise RuntimeError(f"postgres connect {type(exc).__name__}") from None
     try:
         with conn.cursor() as cur:
-            cur.execute(sql, (symbol,) if params is None else (symbol, *params))
+            bind = (symbol,) if params is None else (symbol, *params) if use_symbol else params
+            cur.execute(sql, bind)
             return cur.fetchall()
     except Exception:
         _discard(conn)
