@@ -57,6 +57,16 @@ def test_raw_reads_full_range(parquet_dir) -> None:
     assert pd.isna(df.iloc[0]["成交额"])
 
 
+def test_filters_to_requested_date_range(parquet_dir) -> None:
+    """请求窗口外的行不得返回（review P2 回归）。"""
+    df = provider.fetch_stock_parquet("600519", "20250101", "20250131", "")
+    assert len(df) == 1
+    assert df.iloc[0]["日期"] == "2025-01-02"
+    # 跨年窗口：2024 尾 + 2025 头，不含 2025 尾
+    cross = provider.fetch_stock_parquet("600519", "20241201", "20250110", "")
+    assert cross["日期"].tolist() == ["2024-12-30", "2024-12-31", "2025-01-02"]
+
+
 def test_amount_passthrough_when_populated(tmp_path, monkeypatch) -> None:
     """asharedb 补填 amount 后，provider 应透传真值而非 NA。"""
     candles = tmp_path / "candles"
@@ -105,8 +115,8 @@ def test_hfq_unsupported_raises(parquet_dir) -> None:
 
 
 def test_missing_year_file_returns_empty(parquet_dir) -> None:
-    # 请求 2027 年（无文件）→ empty
-    with pytest.raises(RuntimeError, match="parquet empty"):
+    # 请求 2027 年（无该年份文件）→ stale（全量最新 2026-01-31 < 2027 请求）
+    with pytest.raises(RuntimeError, match="parquet stale"):
         provider.fetch_stock_parquet("600519", "20270101", "20271231", "")
 
 

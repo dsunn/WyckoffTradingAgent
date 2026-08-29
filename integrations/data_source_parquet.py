@@ -37,12 +37,17 @@ def fetch_stock_parquet(symbol: str, start: str, end: str, adjust: str) -> pd.Da
     if str(adjust or "").strip().lower() == "hfq":
         raise RuntimeError("parquet hfq unsupported")
 
-    candles = _read_candles(symbol, start, end)
+    candles = _read_candles(symbol)
     if candles.empty:
         raise RuntimeError("parquet empty")
+    # stale 检查基于全量最新日期：数据源未覆盖到请求结束日时降级实时源。
     max_date = str(candles["date"].max()).replace("-", "")
     if max_date < end:
         raise RuntimeError(f"parquet stale max={candles['date'].max()}")
+
+    candles = _slice_by_window(candles, start, end)
+    if candles.empty:
+        raise RuntimeError("parquet empty window")
 
     if str(adjust or "").strip().lower() == "qfq":
         candles = _apply_qfq(candles, symbol)
@@ -55,19 +60,18 @@ def _is_a_share_symbol(symbol: str) -> bool:
     return len(code) == 6 and code.isdigit()
 
 
-def _read_candles(symbol: str, start: str, end: str) -> pd.DataFrame:
+def _read_candles(symbol: str) -> pd.DataFrame:
+    """读取该股全部年份 K 线（stale 判断与窗口切片由调用方做）。"""
     try:
         import pyarrow.parquet as pq
     except ImportError:
         raise RuntimeError("parquet pyarrow missing") from None
 
-    start_year = int(start[:4])
-    end_year = int(end[:4])
+    candles_dir = DATA_DIR / "candles"
+    if not candles_dir.is_dir():
+        return pd.DataFrame()
     frames: list[pd.DataFrame] = []
-    for year in range(start_year, end_year + 1):
-        path = DATA_DIR / "candles" / f"{year}.parquet"
-        if not path.exists():
-            continue
+    for path in sorted(candles_dir.glob("*.parquet")):
         table = pq.read_table(path, filters=[("code", "==", symbol)])
         if table.num_rows:
             frames.append(table.to_pandas())
@@ -75,6 +79,14 @@ def _read_candles(symbol: str, start: str, end: str) -> pd.DataFrame:
         return pd.DataFrame()
     out = pd.concat(frames, ignore_index=True).drop_duplicates(["code", "date"], keep="last")
     out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return out.sort_values("date").reset_index(drop=True)
+
+
+def _slice_by_window(df: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    """按请求窗口过滤（YYYYMMDD），范围外数据不得返回。"""
+    start_s = f"{start[:4]}-{start[4:6]}-{start[6:]}"
+    end_s = f"{end[:4]}-{end[4:6]}-{end[6:]}"
+    out = df[(df["date"] >= start_s) & (df["date"] <= end_s)]
     return out.sort_values("date").reset_index(drop=True)
 
 
@@ -92,10 +104,15 @@ def _apply_qfq(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         on="_key",
         direction="backward",
     )
-    factor = merged["qfq_factor"].ffill().bfill().fillna(1.0).replace(0, 1.0)
+    # 因子按 _key 显式对齐，不依赖 merge_asof 后的位置顺序。
+    factor_by_key = merged["qfq_factor"].ffill().bfill().fillna(1.0).replace(0, 1.0)
+    factor_by_key = factor_by_key.set_axis(merged["_key"].tolist())
     out = df.copy().reset_index(drop=True)
+    out["_key"] = pd.to_datetime(out["date"], errors="coerce")
+    factor = out["_key"].map(factor_by_key)
     for col in ("open", "high", "low", "close"):
         out[col] = pd.to_numeric(out[col], errors="coerce") / factor
+    # 成交量按因子放大保持成交额一致；amount 不动——复权量×复权价=原成交额，本身就是对账口径。
     out["volume"] = pd.to_numeric(out["volume"], errors="coerce") * factor
     return out
 
