@@ -156,6 +156,7 @@ def test_hfq_unsupported_raises(pg_env) -> None:
 
 def test_unconfigured_raises(monkeypatch) -> None:
     monkeypatch.delenv("PGPASSWORD", raising=False)
+    monkeypatch.setattr(provider, "_pg_config_file", lambda: {})
     with pytest.raises(RuntimeError, match="postgres unconfigured"):
         provider.fetch_stock_postgres("600519", "20250101", "20260131", "")
 
@@ -221,3 +222,38 @@ def test_factor_read_failure_logs_warning(pg_env, monkeypatch, caplog) -> None:
         df = provider.fetch_stock_postgres("600519", "20250101", "20250131", "qfq")
     assert any("factor read failed" in r.message for r in caplog.records)
     assert len(df) == 2
+
+
+def test_pg_config_prefers_file_over_default(monkeypatch) -> None:
+    """无环境变量时从 wyckoff.json 的 pg_data_source 段读（Windows 桌面端场景）。"""
+    for key in ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE"):
+        monkeypatch.delenv(key, raising=False)
+
+    def fake_load_config():
+        return {
+            "pg_data_source": {
+                "host": "file-host",
+                "port": "15432",
+                "user": "file-user",
+                "password": "file-pass",
+                "database": "file-db",
+            }
+        }
+
+    monkeypatch.setattr("integrations.local_auth.load_config", fake_load_config)
+    cfg = provider._pg_config()
+    assert cfg["host"] == "file-host"
+    assert cfg["port"] == "15432"
+    assert cfg["password"] == "file-pass"
+    assert cfg["database"] == "file-db"
+
+
+def test_pg_config_env_overrides_file(monkeypatch) -> None:
+    """环境变量优先于 config 文件。"""
+    monkeypatch.setenv("PGHOST", "env-host")
+
+    def fake_load_config():
+        return {"pg_data_source": {"host": "file-host"}}
+
+    monkeypatch.setattr("integrations.local_auth.load_config", fake_load_config)
+    assert provider._pg_config()["host"] == "env-host"

@@ -39,8 +39,35 @@ _CONN_IDLE_TIMEOUT_SECONDS = 300.0
 
 
 def _pg_config() -> dict[str, str]:
-    """运行时读 PG* 环境变量（模块 import 时读会让测试/改环境变量失效）。"""
-    return {key: os.getenv(env, default) for key, env, default in _pg_env_bindings()}
+    """PG 连接配置：环境变量 > ~/.wyckoff/wyckoff.json 的 pg_data_source 段 > 默认值。
+
+    运行时读取（模块 import 时读会让测试/改配置失效）。config 文件路径与
+    项目本地配置一致，Windows 桌面端无需设置环境变量即可配 PG 数据源。
+    """
+    file_cfg = _pg_config_file()
+    out: dict[str, str] = {}
+    for key, env, default in _pg_env_bindings():
+        env_value = os.getenv(env, "").strip()
+        file_value = str(file_cfg.get(key, "") or "").strip()
+        out[key] = env_value or file_value or default
+    return out
+
+
+def _pg_config_file() -> dict[str, str]:
+    try:
+        from integrations.local_auth import load_config
+
+        data = load_config()
+        return dict(data.get("pg_data_source", {}) or {})
+    except Exception:
+        return {}
+
+
+def _save_pg_config(cfg: dict[str, str]) -> None:
+    """把 PG 连接写入 ~/.wyckoff/wyckoff.json 的 pg_data_source 段（供桌面端调用）。"""
+    from integrations.local_auth import save_config_key
+
+    save_config_key("pg_data_source", {key: str(cfg.get(key, "") or "") for key, _env, _default in _pg_env_bindings()})
 
 
 def _pg_env_bindings():
